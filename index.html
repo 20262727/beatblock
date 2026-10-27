@@ -532,7 +532,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     { f: 'rx',  lab: 'X回転',  short: 'X回', min: -180, max: 180, step: 5,   def: 0,  col: 'note',  fmt: v => Math.round(v) + '°' },
     { f: 'ry',  lab: 'Y回転',  short: 'Y回', min: -180, max: 180, step: 5,   def: 0,  col: 'note',  fmt: v => Math.round(v) + '°' },
     { f: 'dir', lab: 'Z回転（向き）', short: 'Z回', min: -180, max: 180, step: 5, def: 0, col: 'note', fmt: v => Math.round(v) + '°' },
-    { f: 'z',   lab: '奥行き', short: '奥', min: 0,    max: 1,   step: .05,  def: 0,  col: 'GOOD',  fmt: v => Math.round(v * 100) + '%' },
+    { f: 'z',   lab: '奥行き', short: '奥', min: -1,   max: 1,   step: .05,  def: 0,  col: 'GOOD',  fmt: v => Math.abs(v) < .005 ? '基準' : (v > 0 ? '奥' : '手前') + Math.round(Math.abs(v) * 100) + '%' },
     { f: 'spd', lab: '速度',   short: '速', min: .25,  max: 4,   step: .05,  def: 1,  col: 'flick', fmt: v => '×' + (+v.toFixed(2)) }
   ];
   C.perfectish = C.PERFECT;
@@ -547,7 +547,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       if (beat >= e.t1 && !(e.t1 === e.t0 && beat < e.t0)) { v = e.v; continue; }
       if (beat >= e.t0) {
         const k = e.t1 > e.t0 ? clamp((beat - e.t0) / (e.t1 - e.t0), 0, 1) : 1;
-        v = f === 'a' ? (beat >= e.t0 ? e.v : v) : v + (e.v - v) * easeFn(e.e)(k);
+        const from = e.s0 == null ? v : e.s0;
+        v = f === 'a' ? (beat >= e.t0 ? e.v : v) : from + (e.v - from) * easeFn(e.e)(k);
       }
       break;
     }
@@ -768,7 +769,11 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
           const v = +(bx.init || {})[p.f]; if (isFinite(v) && bx.init[p.f] !== null) b.init[p.f] = v;
           const list = (bx.ev && Array.isArray(bx.ev[p.f])) ? bx.ev[p.f] : [];
           b.ev[p.f] = list.filter(e => e && isFinite(+e.t0) && isFinite(+e.t1) && isFinite(+e.v))
-            .map(e => ({ t0: Math.max(0, Math.min(+e.t0, +e.t1)), t1: Math.max(0, +e.t0, +e.t1), v: +e.v, e: EASES[e.e] ? e.e : 'linear' }));
+            .map(e => {
+              const o = { t0: Math.max(0, Math.min(+e.t0, +e.t1)), t1: Math.max(0, +e.t0, +e.t1), v: +e.v, e: EASES[e.e] ? e.e : 'linear' };
+              if (e.s0 != null && isFinite(+e.s0) && !p.toggle) o.s0 = +e.s0;
+              return o;
+            });
         }
         return b;
       });
@@ -933,7 +938,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   // Scene: 3D geometry + drawing (game and editor preview)
   // =========================================================
   const unitFor = w => Math.min(w * 0.16, 100);
-  const depthK = z => 1 / (1 + 1.5 * clamp(z, 0, 1));
+  // depth: positive = farther back (smaller), negative = closer to you (bigger, up to x2)
+  const depthK = z => (z = clamp(z, -1, 1)) >= 0 ? 1 / (1 + 1.5 * z) : 1 - z;
   function geomAt(chart, beat, w, h, unit) {
     const out = [];
     for (let i = 0; i < chart.boxes.length; i++) {
@@ -996,7 +1002,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
         ctx.beginPath(); ctx.moveTo(-s * .24, s * .14); ctx.lineTo(0, -s * .14); ctx.lineTo(s * .24, s * .14); ctx.stroke();
       }
     }
-    if (fakeMark) { ctx.strokeStyle = C.miss; ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5; ctx.strokeRect(-s / 2 - 2, -s / 2 - 2, s + 4, s + 4); ctx.setLineDash([]); }
+    if (fakeMark) { ctx.strokeStyle = C.MISS; ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5; ctx.strokeRect(-s / 2 - 2, -s / 2 - 2, s + 4, s + 4); ctx.setLineDash([]); }
   }
   // byBox: per box, notes {t, tEnd, type, spd, op, headDone}
   function renderScene(ctx, w, h, boxes, byBox, t, pxPerSec, held, pulse) {
@@ -1320,7 +1326,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       g.font = `400 ${Math.round(Math.min(18, W * 0.045))}px "Dela Gothic One", sans-serif`;
       g.fillText(fx.j, bx.x, ty);
       if (fx.fs) {
-        g.fillStyle = fx.fs === 'FAST' ? C.note : C.miss;
+        g.fillStyle = fx.fs === 'FAST' ? C.note : C.MISS;
         g.font = '700 11px "M PLUS 1 Code", monospace';
         g.fillText(fx.fs, bx.x, ty + 16);
       }
@@ -1356,7 +1362,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     metro: false, taps: [], drag: null, preview: true,
     mode: 'notes', lineBox: 0, sel: null, pending: null, sheet: null,
     tool: 'tap', fake: false, spd: 1, nop: 1, pendingLong: null, lastEase: 'inOutCubic',
-    selecting: false, selN: new Set(), selE: new Map(), clip: null
+    selecting: false, selN: new Set(), selE: new Map(), clip: null, pasting: false, hover: null
   };
   let doc = null;
   const ch = () => doc.chart;
@@ -1442,7 +1448,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     openEditor(sample);
     flashHint('お手本を表示中。ここでの変更は保存されません。書き出し→自分の譜面で読み込み、で持っていけます。');
   };
-  $('edBack').onclick = () => { edStop(); closeSheet(); show('title'); };
+  $('edBack').onclick = () => { edStop(); closeSheet(); if (ed.pasting) stopPaste(); show('title'); };
   function test(auto) {
     edStop();
     if (!ch().notes.length) { flashHint('ノーツがまだありません。「ノーツ」で枠の列をタップして置いてください。'); return; }
@@ -1455,7 +1461,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   function setMode(m) {
     ed.mode = m; ed.pending = null; ed.pendingLong = null;
     document.querySelectorAll('.mode').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
-    if ($('selInfo')) updSelUI();
+    if ($('selInfo')) { updSelUI(); if (ed.pasting && ed.clip && (ed.clip.kind === 'notes') !== (m === 'notes')) stopPaste(); }
     $('notesTools').style.display = m === 'notes' ? 'contents' : 'none';
     $('lineTools').style.display = m === 'line' ? 'contents' : 'none';
     $('edLineBox').hidden = m !== 'line';
@@ -1609,6 +1615,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     if (mod && (k === 'y' || k === 'Y')) { if (typing) return; e.preventDefault(); redo(); return; }
     if (mod && !typing && /^[acxvACXV]$/.test(k)) {
       e.preventDefault();
+      if (k.toLowerCase() === 'v' && ed.pasting && ed.hover && ed.clip) { const p = pasteTarget(ed.hover.col, ed.hover.beat); doPaste(p.at, p.shift); return; }
       ({ a: selectAll, c: () => copySel(), x: cutSel, v: pasteClip })[k.toLowerCase()]();
       return;
     }
@@ -1644,7 +1651,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
         else if (ed.sel && ed.sheet === 'event') { hit(); const l = ch().boxes[ed.lineBox].ev[ed.sel.f]; l.splice(l.indexOf(ed.sel.ev), 1); saveChart(); closeSheet(); flashHint('イベントを削除しました'); }
         break;
       case 'Escape':
-        if (ed.pending || ed.pendingLong) { ed.pending = null; ed.pendingLong = null; setHint(); }
+        if (ed.pasting) stopPaste();
+        else if (ed.pending || ed.pendingLong) { ed.pending = null; ed.pendingLong = null; setHint(); }
         else if (ed.selN.size || ed.selE.size) clearSel();
         else if (!$('sheet').hidden) closeSheet();
         break;
@@ -1729,13 +1737,14 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     if (ed.mode === 'line') {
       if (!ed.selE.size) return false;
       const list = [...ed.selE], base = Math.min(...list.map(([e]) => e.t0));
-      ed.clip = { kind: 'events', items: list.map(([e, f]) => ({ f, t0: e.t0 - base, t1: e.t1 - base, v: e.v, e: e.e })) };
+      ed.clip = { kind: 'events', items: list.map(([e, f]) => ({ f, t0: e.t0 - base, t1: e.t1 - base, v: e.v, e: e.e, s0: e.s0 })) };
     } else {
       if (!ed.selN.size) return false;
       const list = [...ed.selN], base = Math.min(...list.map(n => n.beat));
-      ed.clip = { kind: 'notes', items: list.map(n => ({ ...n, beat: n.beat - base })) };
+      ed.clip = { kind: 'notes', items: list.map(n => ({ ...n, beat: n.beat - base })), minB: Math.min(...list.map(n => n.b)) };
     }
-    if (!quiet) flashHint(`${ed.clip.items.length}個コピーしました。貼り付けたい位置に移動して「貼り付け」（Ctrl+V）`);
+    leaveSelecting();
+    if (!quiet) flashHint(`${ed.clip.items.length}個コピーしました。「貼り付け」（Ctrl+V）を押してから、貼りたい場所をタップ`);
     updSelUI(); return true;
   }
   function deleteSel(quiet) {
@@ -1751,34 +1760,64 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     if (k) { saveChart(); if (!quiet) flashHint(`${k}個削除しました`); }
     updSelUI();
   }
-  function cutSel() { if (copySel(true)) { const k = ed.clip.items.length; deleteSel(true); flashHint(`${k}個切り取りました。貼り付けたい位置で「貼り付け」（Ctrl+V）`); } }
-  function pasteClip() {
+  function cutSel() { if (copySel(true)) { const k = ed.clip.items.length; deleteSel(true); flashHint(`${k}個切り取りました。「貼り付け」（Ctrl+V）を押してから、貼りたい場所をタップ`); } }
+  function leaveSelecting() {
+    if (!ed.selecting) return;
+    ed.selecting = false; $('edSelect').classList.remove('on'); $('edSelect').setAttribute('aria-pressed', false);
+  }
+  function startPaste() {
     if (!ed.clip) return;
-    const c = ch(), at = Math.max(0, snap(ed.viewBeat));
+    if (ed.pasting) { stopPaste(); return; }
+    leaveSelecting(); ed.pending = null; ed.pendingLong = null;
+    const want = ed.clip.kind === 'notes' ? 'notes' : 'line';
+    if (ed.mode !== want) setMode(want);
+    ed.pasting = true; $('edPaste').classList.add('on'); $('edPaste').textContent = '貼り付け中（終了）';
+    flashHint(ed.clip.kind === 'notes'
+      ? '貼りたい場所をタップ（左端のノーツがタップした枠に来ます）。何回でも貼れます ・ 終わるときは「貼り付け中（終了）」か Esc'
+      : `枠${ed.lineBox + 1}の、貼りたい拍をタップ。何回でも貼れます ・ 終わるときは「貼り付け中（終了）」か Esc`, true);
+  }
+  function stopPaste() {
+    ed.pasting = false; ed.hover = null;
+    $('edPaste').classList.remove('on'); $('edPaste').textContent = '貼り付け';
+    setHint();
+  }
+  // where a paste would land: beat + lane shift
+  function pasteTarget(col, beat) {
+    const c = ch();
+    if (ed.clip.kind !== 'notes') return { at: Math.max(0, beat), shift: 0 };
+    const maxB = Math.max(...ed.clip.items.map(it => it.b));
+    const shift = clamp(col - ed.clip.minB, -ed.clip.minB, boxCount(c) - 1 - maxB);
+    return { at: Math.max(0, beat), shift };
+  }
+  function doPaste(at, shift) {
+    const c = ch();
     if (ed.clip.kind === 'notes') {
-      if (ed.mode !== 'notes') setMode('notes');
-      const N = boxCount(c), taken = new Set(c.notes.map(n => n.b + ':' + n.beat));
-      ed.selN.clear(); let k = 0, skipped = 0;
+      const N = boxCount(c), taken = new Map(c.notes.map(n => [n.b + ':' + n.beat, n]));
+      ed.selN.clear(); let k = 0, replaced = 0, out = 0;
       for (const it of ed.clip.items) {
-        const beat = Math.round((at + it.beat) * 10000) / 10000;
-        if (it.b >= N) { skipped++; continue; }
-        if (taken.has(it.b + ':' + beat)) continue;
-        const n = { ...it, beat }; c.notes.push(n); ed.selN.add(n); k++;
+        const beat = Math.round((at + it.beat) * 10000) / 10000, b = it.b + shift;
+        if (b < 0 || b >= N) { out++; continue; }
+        const old = taken.get(b + ':' + beat);
+        if (old) { c.notes.splice(c.notes.indexOf(old), 1); replaced++; }
+        const n = { ...it, beat, b }; c.notes.push(n); ed.selN.add(n); k++;
       }
       sortChart(c); saveChart();
-      flashHint(`${fmtPos(at)} から ${k}個貼り付けました` + (skipped ? `（枠が足りず${skipped}個は貼れませんでした）` : ''));
+      flashHint(`${fmtPos(at)} に ${k}個貼り付けました` + (replaced ? `（重なった${replaced}個は置き換え）` : '') + (out ? `（枠が足りず${out}個は貼れませんでした）` : '') + ' ・ 続けて貼れます、終わるときは Esc', true);
     } else {
-      if (ed.mode !== 'line') setMode('line');
       const bx = c.boxes[ed.lineBox]; ed.selE.clear();
       for (const it of ed.clip.items) {
         const e = { t0: at + it.t0, t1: at + it.t1, v: it.v, e: it.e };
+        if (it.s0 != null) e.s0 = it.s0;
         bx.ev[it.f].push(e); ed.selE.set(e, it.f);
       }
       sortChart(c); saveChart();
-      flashHint(`枠${ed.lineBox + 1}に ${fmtPos(at)} から イベント${ed.clip.items.length}個を貼り付けました`);
+      flashHint(`枠${ed.lineBox + 1}の ${fmtPos(at)} に イベント${ed.clip.items.length}個を貼り付けました ・ 続けて貼れます、終わるときは Esc`, true);
     }
+    resumeAC(); tapSound(ac.currentTime);
     updSelUI();
   }
+  // keep the old name for the keyboard shortcut and button
+  const pasteClip = startPaste;
   function moveSel(dBeat, dLane) {
     const c = ch();
     if (ed.mode === 'line') {
@@ -1792,6 +1831,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     sortChart(c); saveChart(); return true;
   }
   $('edSelect').onclick = e => {
+    if (ed.pasting) stopPaste();
     ed.selecting = !ed.selecting;
     e.currentTarget.classList.toggle('on', ed.selecting); e.currentTarget.setAttribute('aria-pressed', ed.selecting);
     ed.pending = null; ed.pendingLong = null; setHint();
@@ -1811,6 +1851,10 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       inLanes: lx >= GUT && lx <= EW - WAVE, add: e.shiftKey || e.ctrlKey || e.metaKey };
   });
   edc.addEventListener('pointermove', e => {
+    if (ed.pasting) {
+      const r = edc.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      ed.hover = x >= GUT && x <= EW - WAVE ? { col: colAt(x), beat: snap(edBeat(y)) } : null;
+    }
     const d = ed.drag; if (!d) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
     if (!d.moved && (ed.selecting || d.add) && d.inLanes && Math.hypot(dx, dy) > 6) d.moved = 'rect';
@@ -1830,9 +1874,11 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     if (x < GUT || x > EW - WAVE) return;
     const raw = edBeat(y), b = snap(raw);
     const col = clamp(Math.floor((x - GUT + scrollX()) / lanesW()), 0, nLanes() - 1);
+    if (ed.pasting && ed.clip) { const p = pasteTarget(col, b); doPaste(p.at, p.shift); return; }
     if (ed.selecting || d.add) { tapSelect(col, y, raw, d.add); return; }
     if (ed.mode === 'line') lineTap(col, b, raw); else if (b >= 0) placeOrRemove(col, b);
   });
+  edc.addEventListener('pointerleave', () => { ed.hover = null; });
   edc.addEventListener('wheel', e => {
     e.preventDefault();
     if (e.ctrlKey) { ed.ppb = clamp(ed.ppb * (e.deltaY < 0 ? 1.1 : 1 / 1.1), 30, 600); return; }
@@ -1923,13 +1969,32 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     const info = document.createElement('div'); info.className = 'info';
     const refresh = () => {
       title.textContent = `枠${ed.lineBox + 1} ・ ${P.lab} ・ ${fmtPos(ev.t0)} → ${fmtPos(ev.t1)}`;
-      const from = propAt({ init: bx.init, ev: { [f]: bx.ev[f].filter(e => e !== ev && e.t0 <= ev.t0) } }, f, ev.t0);
+      const from = ev.s0 != null ? ev.s0 : prevValue();
       info.textContent = ev.t1 > ev.t0
         ? `長さ ${fmtBeats(ev.t1 - ev.t0)} ・ ${P.fmt(from)} から ${P.fmt(ev.v)} へ`
         : `${fmtPos(ev.t0)} で ${P.fmt(ev.v)} に瞬間で切り替え`;
       drawEase(ev.e);
     };
-    sh.appendChild(valueRow(P, () => ev.v, v => { ev.v = v; saveChart(); refresh(); }, 'ev_v'));
+    const prevValue = () => propAt({ init: bx.init, ev: { [f]: bx.ev[f].filter(e => e !== ev && e.t0 <= ev.t0) } }, f, ev.t0);
+    if (!P.toggle) {
+      // start value: carry on from the previous state, or jump to a chosen value at the start
+      const box = document.createElement('div'); box.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+      const tg = document.createElement('label'); tg.className = 'info'; tg.style.cssText = 'display:flex;gap:6px;align-items:center';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.id = 'ev_s0on'; cb.checked = ev.s0 != null;
+      tg.append(cb, document.createTextNode('開始の値を決める（オフなら直前の状態から続けて動く）'));
+      const holder = document.createElement('div');
+      const build = () => {
+        holder.textContent = '';
+        if (ev.s0 == null) return;
+        const r = valueRow({ ...P, lab: '開始の値' }, () => ev.s0, v => { ev.s0 = v; saveChart(); refresh(); }, 'ev_s0');
+        r.firstChild.style.color = C.fg; holder.appendChild(r);
+      };
+      cb.onchange = () => { if (cb.checked) ev.s0 = +(+prevValue()).toFixed(4); else delete ev.s0; saveChart(); build(); refresh(); };
+      build(); box.append(tg, holder); sh.appendChild(box);
+    }
+    const endRow = valueRow({ ...P, lab: P.toggle ? P.lab : '終了の値' }, () => ev.v, v => { ev.v = v; saveChart(); refresh(); }, 'ev_v');
+    if (!P.toggle) endRow.firstChild.style.color = C.fg;
+    sh.appendChild(endRow);
     // easing
     if (!P.toggle) {
       const er = document.createElement('div'); er.className = 'easerow';
@@ -2028,7 +2093,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       eg.translate(x, y); drawNoteFlat(eg, n.type, ns, n.fake);
       eg.globalAlpha = 1;
       if (ed.selN.has(n)) { eg.strokeStyle = C.PERFECT; eg.lineWidth = 2.5; eg.strokeRect(-ns / 2 - 4, -ns / 2 - 4, ns + 8, ns + 8); }
-      if (hidden) { eg.strokeStyle = C.miss; eg.lineWidth = 2; eg.strokeRect(-ns / 2 - 3, -ns / 2 - 3, ns + 6, ns + 6); }
+      if (hidden) { eg.strokeStyle = C.MISS; eg.lineWidth = 2; eg.strokeRect(-ns / 2 - 3, -ns / 2 - 3, ns + 6, ns + 6); }
       const tags = [];
       if (n.spd !== 1) tags.push('×' + n.spd);
       if ((n.op ?? 1) < 1) tags.push(Math.round(n.op * 100) + '%');
@@ -2068,7 +2133,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
           for (let i = 0; i <= 16; i++) { const t = i / 16, px = x0 + 6 + fn(t) * (lw - 12), py = yS - t * hgt; i ? eg.lineTo(px, py) : eg.moveTo(px, py); }
           eg.stroke();
         }
-        if (lw > 26) { eg.fillStyle = C.fg; eg.font = '700 9px "M PLUS 1 Code", monospace'; eg.textAlign = 'center'; eg.fillText(P.fmt(e.v), x0 + lw / 2, yS - hgt - 7); }
+        if (lw > 26) { eg.fillStyle = C.fg; eg.font = '700 9px "M PLUS 1 Code", monospace'; eg.textAlign = 'center'; eg.fillText((e.s0 != null && lw > 50 ? P.fmt(e.s0) + '→' : '') + P.fmt(e.v), x0 + lw / 2, yS - hgt - 7); }
       }
       // the value line over time
       if (!P.toggle) {
@@ -2077,7 +2142,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
         rows.forEach(([y, b], r) => { const X = px(propAt(bx, P.f, b)); r ? eg.lineTo(X, y) : eg.moveTo(X, y); });
         eg.stroke();
       } else {
-        for (let r = 1; r < rows.length; r++) if (propAt(bx, 'a', rows[r][1]) < .5) { eg.fillStyle = rgba(C.miss, 0.25); eg.fillRect(x0 + 1, rows[r][0], lw - 2, rows[r - 1][0] - rows[r][0]); }
+        for (let r = 1; r < rows.length; r++) if (propAt(bx, 'a', rows[r][1]) < .5) { eg.fillStyle = rgba(C.MISS, 0.25); eg.fillRect(x0 + 1, rows[r][0], lw - 2, rows[r - 1][0] - rows[r][0]); }
       }
       if (ed.pending && ed.pending.col === j) {
         const y = edY(ed.pending.b);
@@ -2087,6 +2152,32 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       }
     });
     labels(N, j => lw < 44 ? PROPS[j].short : PROPS[j].lab.replace('（向き）', ''), j => C[PROPS[j].col]);
+  }
+  function drawPasteGhost() {
+    const hv = ed.hover || { col: ed.clip.kind === 'notes' ? ed.clip.minB : 0, beat: Math.max(0, snap(ed.viewBeat)) };
+    const p = pasteTarget(hv.col, hv.beat), lw = lanesW();
+    eg.save(); eg.globalAlpha = 0.55; eg.setLineDash([4, 3]); eg.strokeStyle = C.PERFECT; eg.lineWidth = 1.5;
+    if (ed.clip.kind === 'notes' && ed.mode === 'notes') {
+      const ns = Math.min(lw * 0.55, 30);
+      for (const it of ed.clip.items) {
+        const x = laneX(it.b + p.shift) + lw / 2, y = edY(p.at + it.beat);
+        if (y < -ns || y > EH + ns) continue;
+        if (it.type === 'long') { const ye = edY(p.at + it.beat + it.len); eg.fillStyle = rgba(C.note, .3); eg.fillRect(x - ns * .3, ye, ns * .6, y - ye); }
+        eg.save(); eg.translate(x, y); drawNoteFlat(eg, it.type, ns, false); eg.restore();
+        eg.strokeRect(x - ns / 2 - 3, y - ns / 2 - 3, ns + 6, ns + 6);
+      }
+    } else if (ed.clip.kind === 'events' && ed.mode === 'line') {
+      for (const it of ed.clip.items) {
+        const j = PROPS.findIndex(P => P.f === it.f), x0 = laneX(j);
+        const yS = edY(p.at + it.t0), yE = edY(p.at + it.t1), hgt = Math.max(4, yS - yE);
+        eg.fillStyle = rgba(C[PROPS[j].col], .35); eg.fillRect(x0 + 3, yS - hgt, lw - 6, hgt);
+        eg.strokeRect(x0 + 3.5, yS - hgt + .5, lw - 7, hgt - 1);
+      }
+    }
+    // the line where it will start
+    const y = edY(p.at); eg.globalAlpha = 0.9; eg.setLineDash([6, 4]); eg.strokeStyle = C.PERFECT; eg.lineWidth = 1.5;
+    eg.beginPath(); eg.moveTo(GUT, y); eg.lineTo(EW - WAVE, y); eg.stroke();
+    eg.restore();
   }
   function labels(N, text, color) {
     const lw = lanesW();
@@ -2106,6 +2197,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     const b0 = edBeat(EH) - 1, b1 = edBeat(0) + 1;
     eg.save(); eg.beginPath(); eg.rect(GUT, 0, EW - GUT - WAVE, EH); eg.clip();
     if (ed.mode === 'line') drawLineView(c, b0, b1); else drawNotesView(c, b0, b1);
+    if (ed.pasting && ed.clip) drawPasteGhost();
     const dr = ed.drag;
     if (dr && dr.moved === 'rect') {
       const x = Math.min(dr.lx, dr.cx), y = Math.min(dr.ly, dr.cy), w = Math.abs(dr.cx - dr.lx), h = Math.abs(dr.cy - dr.ly);
