@@ -299,6 +299,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       <button class="btn" id="edAuto">オートで確認</button>
       <button class="btn" id="edExport">書き出し</button>
       <button class="btn" id="edImport">読み込み</button>
+      <button class="btn" id="edUndo" title="元に戻す（Ctrl+Z）" aria-label="元に戻す">↶ 戻す</button>
+      <button class="btn" id="edRedo" title="やり直し（Ctrl+Y）" aria-label="やり直し">↷ やり直し</button>
+      <button class="btn" id="edKeys">⌨ キー操作</button>
     </div>
     <div class="ed-bar gutter">
       <label>BPM <input type="number" id="edBpm" min="20" max="400" step="0.1" value="120"></label>
@@ -341,6 +344,16 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       <button class="btn" id="edAddBox">＋ 枠</button>
       <button class="btn" id="edDelBox">− 枠</button>
     </div>
+    <div class="ed-bar gutter">
+      <button class="btn" id="edSelect" aria-pressed="false">選択モード</button>
+      <button class="btn" id="edSelAll">全選択</button>
+      <button class="btn" id="edCopy">コピー</button>
+      <button class="btn" id="edCut">切り取り</button>
+      <button class="btn" id="edPaste">貼り付け</button>
+      <button class="btn danger" id="edSelDel">削除</button>
+      <button class="btn" id="edSelNone">選択解除</button>
+      <span class="pos" id="selInfo"></span>
+    </div>
     <div class="tl"><canvas id="edCanvas"></canvas><canvas id="pvCanvas"></canvas></div>
     <div class="hint gutter" id="edHint"></div>
     <div class="sheet gutter" id="sheet" hidden></div>
@@ -353,6 +366,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
         <p class="status" id="ioMsg"></p>
         <div class="btns">
           <button class="btn primary" id="ioCopy">コピー</button>
+          <button class="btn" id="ioSave">ファイルに保存</button>
+          <label class="btn" for="ioFile" id="ioOpen">ファイルを開く<input type="file" id="ioFile" accept=".json,application/json,text/plain"></label>
           <button class="btn primary" id="ioLoad">この譜面を読み込む</button>
           <button class="btn" id="ioClose">閉じる</button>
         </div>
@@ -784,7 +799,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   function saveLib() { if (dbOk) DB.set('lib', JSON.stringify(lib.map(e => ({ id: e.id, name: e.name, dur: e.dur })))); }
   function saveEntry(e) { if (dbOk) DB.set('chart:' + e.id, JSON.stringify(e.chart)); }
   let saveTimer = 0;
-  function saveChart() {
+  function saveChart() { snapshot(); persist(); }
+  function persist() {
     clearTimeout(saveTimer);
     const e = doc; if (!e || !e.id) return;
     saveTimer = setTimeout(() => { saveEntry(e); saveLib(); }, 300);
@@ -1339,7 +1355,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     viewBeat: 0, ppb: 90, div: 4, playing: false, src: null, ctxStart: 0, startSec: 0, horizon: 0,
     metro: false, taps: [], drag: null, preview: true,
     mode: 'notes', lineBox: 0, sel: null, pending: null, sheet: null,
-    tool: 'tap', fake: false, spd: 1, nop: 1, pendingLong: null, lastEase: 'inOutCubic'
+    tool: 'tap', fake: false, spd: 1, nop: 1, pendingLong: null, lastEase: 'inOutCubic',
+    selecting: false, selN: new Set(), selE: new Map(), clip: null
   };
   let doc = null;
   const ch = () => doc.chart;
@@ -1367,7 +1384,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     line: '列をタップで開始地点、もう一度タップで終了地点（同じ所なら瞬間）・ 帯をタップでその設定を編集 ・ 線は値の変化'
   };
   let hintTimer = 0;
-  function setHint() { $('edHint').textContent = HINTS[ed.mode]; $('edHint').style.color = ''; }
+  function setHint() { $('edHint').textContent = ed.selecting ? '選択モード：タップで選択／解除、ドラッグで範囲選択 ・ 上下の移動は左の小節番号か右の波形の上をドラッグ、またはホイール ・ PCではShift+クリック／Shift+ドラッグでいつでも選択' : HINTS[ed.mode]; $('edHint').style.color = ''; }
   function flashHint(msg, keep) {
     $('edHint').textContent = msg; $('edHint').style.color = C.hit;
     clearTimeout(hintTimer);
@@ -1402,7 +1419,8 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     $('edDiv').value = ed.div;
     ed.lineBox = Math.min(ed.lineBox, boxCount(c) - 1);
     ed.pending = null; ed.pendingLong = null; closeSheet();
-    syncBoxUI(); setMode(ed.mode);
+    ed.selN.clear(); ed.selE.clear(); updSelUI();
+    syncBoxUI(); setMode(ed.mode); resetHistory();
     show('editor');
   }
   $('edName').addEventListener('change', e => {
@@ -1437,6 +1455,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   function setMode(m) {
     ed.mode = m; ed.pending = null; ed.pendingLong = null;
     document.querySelectorAll('.mode').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+    if ($('selInfo')) updSelUI();
     $('notesTools').style.display = m === 'notes' ? 'contents' : 'none';
     $('lineTools').style.display = m === 'line' ? 'contents' : 'none';
     $('edLineBox').hidden = m !== 'line';
@@ -1451,7 +1470,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     ed.lineBox = Math.min(ed.lineBox, n - 1); sel.value = ed.lineBox;
     $('edAddBox').disabled = n >= MAX_BOXES; $('edDelBox').disabled = n <= 1;
   }
-  $('edLineBox').onchange = e => { ed.lineBox = +e.target.value; ed.pending = null; if (ed.sheet === 'init') openInit(); else closeSheet(); };
+  $('edLineBox').onchange = e => { ed.lineBox = +e.target.value; ed.pending = null; ed.selE.clear(); updSelUI(); if (ed.sheet === 'init') openInit(); else closeSheet(); };
   for (const n of PRESET_NAMES) { const o = document.createElement('option'); o.value = n; o.textContent = n; $('edArrange').appendChild(o); }
   $('edArrangeGo').onclick = () => {
     const c = ch(), b = Math.max(0, snap(ed.viewBeat)), p = presetXY($('edArrange').value, boxCount(c));
@@ -1520,7 +1539,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       return;
     }
     clearTimeout(delArm); delArm = 0; b.textContent = '− 枠';
-    c.boxes.pop(); c.notes = c.notes.filter(x => x.b < n - 1);
+    c.boxes.pop(); c.notes = c.notes.filter(x => x.b < n - 1); ed.selN.clear(); ed.selE.clear(); updSelUI();
     ed.pending = null; ed.pendingLong = null; closeSheet();
     saveChart(); syncBoxUI();
   };
@@ -1547,10 +1566,89 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     ed.playing = false; $('edPlay').textContent = '▶ 試聴';
   }
   $('edPlay').onclick = () => ed.playing ? edStop() : edPlay();
+  // ---- undo / redo: snapshots of the chart; quick slider drags count as one step ----
+  const hist = { undo: [], redo: [], last: null, at: 0 };
+  function resetHistory() { hist.undo = []; hist.redo = []; hist.last = JSON.stringify(ch()); hist.at = 0; syncUndo(); }
+  function snapshot() {
+    if (!doc || hist.last === null) return;
+    const cur = JSON.stringify(ch());
+    if (cur === hist.last) return;
+    const now = performance.now();
+    if (!hist.undo.length || now - hist.at > 600) { hist.undo.push(hist.last); if (hist.undo.length > 200) hist.undo.shift(); }
+    hist.last = cur; hist.at = now; hist.redo = []; syncUndo();
+  }
+  function syncUndo() { $('edUndo').disabled = !hist.undo.length; $('edRedo').disabled = !hist.redo.length; }
+  function applyChart(c) {
+    doc.chart = c; ed.selN.clear(); ed.selE.clear(); updSelUI();
+    $('edBpm').value = c.bpm; $('edOffset').value = Math.round(c.offset * 1000); $('edDiff').value = c.diff || '';
+    ed.pending = null; ed.pendingLong = null; closeSheet(); syncBoxUI();
+    persist();
+  }
+  function undo() {
+    if (!hist.undo.length) return;
+    hist.redo.push(hist.last); hist.last = hist.undo.pop(); hist.at = 0;
+    applyChart(validChart(JSON.parse(hist.last))); syncUndo(); flashHint('元に戻しました');
+  }
+  function redo() {
+    if (!hist.redo.length) return;
+    hist.undo.push(hist.last); hist.last = hist.redo.pop(); hist.at = 0;
+    applyChart(validChart(JSON.parse(hist.last))); syncUndo(); flashHint('やり直しました');
+  }
+  $('edUndo').onclick = undo;
+  $('edRedo').onclick = redo;
+
+  // ---- keyboard (PC) ----
+  const KEY_HELP = 'Space 試聴 ・ Ctrl+Z 戻す ・ Ctrl+Y やり直し ・ ↑↓ 1目盛り移動 ・ PageUp/Down 1小節 ・ Home 最初へ ・ ＋/− 拡大縮小 ・ N ノーツ / L 判定ライン ・ 1〜4 タップ/フリック/ロング/ドラッグ ・ F フェイク ・ [ ] 編集する枠 ・ S 選択モード ・ Shift+クリック/ドラッグで選択 ・ Ctrl+A 全選択 ・ Ctrl+C コピー ・ Ctrl+X 切り取り ・ Ctrl+V 再生位置に貼り付け ・ Shift+↑↓ 選んだものを1目盛り移動 ・ Shift+←→ ノーツを隣の枠へ ・ Delete 削除 ・ Esc 取り消し・選択解除 ・ ホイールで移動、Ctrl+ホイールで拡大、Shift+ホイールで横移動';
+  $('edKeys').onclick = () => flashHint(KEY_HELP, true);
   addEventListener('keydown', e => {
-    if (screen !== 'editor' || e.code !== 'Space') return;
-    if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) || !$('ioModal').hidden) return;
-    e.preventDefault(); ed.playing ? edStop() : edPlay();
+    if (screen !== 'editor' || !$('ioModal').hidden) return;
+    const el = document.activeElement || {};
+    const typing = el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && /^(text|number|search|)$/.test(el.type));
+    const mod = e.ctrlKey || e.metaKey, k = e.key;
+    if (mod && (k === 'z' || k === 'Z')) { if (typing) return; e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+    if (mod && (k === 'y' || k === 'Y')) { if (typing) return; e.preventDefault(); redo(); return; }
+    if (mod && !typing && /^[acxvACXV]$/.test(k)) {
+      e.preventDefault();
+      ({ a: selectAll, c: () => copySel(), x: cutSel, v: pasteClip })[k.toLowerCase()]();
+      return;
+    }
+    if (e.shiftKey && !typing && /^Arrow/.test(k) && (ed.selN.size || ed.selE.size)) {
+      e.preventDefault();
+      const st = 1 / ed.div;
+      moveSel(k === 'ArrowUp' ? st : k === 'ArrowDown' ? -st : 0, k === 'ArrowRight' ? 1 : k === 'ArrowLeft' ? -1 : 0);
+      return;
+    }
+    if (typing || mod || e.altKey) return;
+    const step = 1 / ed.div, go = b => { if (ed.playing) edStop(); ed.viewBeat = clamp(b, -2, songBeats() + 2); };
+    const hit = () => e.preventDefault();
+    switch (k) {
+      case ' ': hit(); ed.playing ? edStop() : edPlay(); break;
+      case 'ArrowUp': hit(); go(snap(ed.viewBeat) + step); break;
+      case 'ArrowDown': hit(); go(snap(ed.viewBeat) - step); break;
+      case 'PageUp': hit(); go(Math.floor(ed.viewBeat / 4) * 4 + 4); break;
+      case 'PageDown': hit(); go(Math.ceil(ed.viewBeat / 4) * 4 - 4); break;
+      case 'Home': hit(); go(0); break;
+      case '+': case '=': hit(); ed.ppb = clamp(ed.ppb * 1.25, 30, 600); break;
+      case '-': hit(); ed.ppb = clamp(ed.ppb / 1.25, 30, 600); break;
+      case 'n': case 'N': setMode('notes'); break;
+      case 'l': case 'L': setMode('line'); break;
+      case 'f': case 'F': if (ed.mode === 'notes') $('edFake').click(); break;
+      case '1': case '2': case '3': case '4':
+        if (ed.mode === 'notes') document.querySelector(`.tool[data-tool="${['tap', 'flick', 'long', 'drag'][+k - 1]}"]`).click(); break;
+      case '[': case ']':
+        if (ed.mode === 'line') { const n = boxCount(ch()); ed.lineBox = (ed.lineBox + (k === ']' ? 1 : n - 1)) % n; $('edLineBox').value = ed.lineBox; ed.pending = null; if (ed.sheet === 'init') openInit(); else closeSheet(); }
+        break;
+      case 's': case 'S': $('edSelect').click(); break;
+      case 'Delete': case 'Backspace':
+        if ((ed.mode === 'line' ? ed.selE.size : ed.selN.size)) { hit(); deleteSel(); }
+        else if (ed.sel && ed.sheet === 'event') { hit(); const l = ch().boxes[ed.lineBox].ev[ed.sel.f]; l.splice(l.indexOf(ed.sel.ev), 1); saveChart(); closeSheet(); flashHint('イベントを削除しました'); }
+        break;
+      case 'Escape':
+        if (ed.pending || ed.pendingLong) { ed.pending = null; ed.pendingLong = null; setHint(); }
+        else if (ed.selN.size || ed.selE.size) clearSel();
+        else if (!$('sheet').hidden) closeSheet();
+        break;
+    }
   });
   function edTick() {
     if (!ed.playing) return;
@@ -1579,14 +1677,144 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     if (pos > doc.song.buffer.duration) edStop();
   }
 
+  // ---- multi-select, copy / cut / paste ----
+  const colAt = x => clamp(Math.floor((x - GUT + scrollX()) / lanesW()), 0, nLanes() - 1);
+  function noteAt(col, y) {
+    const c = ch();
+    return c.notes.find(n => n.b === col && (Math.abs(edY(n.beat) - y) <= 10 || (n.type === 'long' && y <= edY(n.beat) && y >= edY(n.beat + n.len) - 4)));
+  }
+  function eventAt(col, raw) {
+    const P = PROPS[col], tol = 6 / ed.ppb;
+    return P ? ch().boxes[ed.lineBox].ev[P.f].find(e => raw >= e.t0 - tol && raw <= e.t1 + tol) : null;
+  }
+  function tapSelect(col, y, raw, add) {
+    if (ed.mode === 'line') {
+      const ev = eventAt(col, raw);
+      if (!ev) { if (!add) ed.selE.clear(); }
+      else if (ed.selE.has(ev)) ed.selE.delete(ev); else ed.selE.set(ev, PROPS[col].f);
+    } else {
+      const n = noteAt(col, y);
+      if (!n) { if (!add) ed.selN.clear(); }
+      else if (ed.selN.has(n)) ed.selN.delete(n); else ed.selN.add(n);
+    }
+    updSelUI();
+  }
+  function rectSelect(d) {
+    const y0 = Math.min(d.ly, d.cy), y1 = Math.max(d.ly, d.cy);
+    const bLo = edBeat(y1), bHi = edBeat(y0);
+    const c0 = colAt(Math.min(d.lx, d.cx)), c1 = colAt(Math.max(d.lx, d.cx));
+    if (ed.mode === 'line') {
+      if (!d.add) ed.selE.clear();
+      const bx = ch().boxes[ed.lineBox];
+      for (let j = c0; j <= c1; j++) for (const e of bx.ev[PROPS[j].f]) if (e.t1 >= bLo && e.t0 <= bHi) ed.selE.set(e, PROPS[j].f);
+    } else {
+      if (!d.add) ed.selN.clear();
+      for (const n of ch().notes) if (n.b >= c0 && n.b <= c1 && n.beat + (n.len || 0) >= bLo && n.beat <= bHi) ed.selN.add(n);
+    }
+    updSelUI();
+  }
+  function clearSel() { ed.selN.clear(); ed.selE.clear(); updSelUI(); }
+  function updSelUI() {
+    const n = ed.mode === 'line' ? ed.selE.size : ed.selN.size;
+    $('selInfo').textContent = (n ? `${n}個選択中` : '') + (ed.clip ? `${n ? ' ・ ' : ''}コピー中：${ed.clip.kind === 'notes' ? 'ノーツ' : 'イベント'}${ed.clip.items.length}個` : '');
+    for (const id of ['edCopy', 'edCut', 'edSelDel', 'edSelNone']) $(id).disabled = !n;
+    $('edPaste').disabled = !ed.clip;
+  }
+  function selectAll() {
+    if (ed.mode === 'line') { const bx = ch().boxes[ed.lineBox]; for (const P of PROPS) for (const e of bx.ev[P.f]) ed.selE.set(e, P.f); }
+    else for (const n of ch().notes) ed.selN.add(n);
+    updSelUI();
+  }
+  function copySel(quiet) {
+    if (ed.mode === 'line') {
+      if (!ed.selE.size) return false;
+      const list = [...ed.selE], base = Math.min(...list.map(([e]) => e.t0));
+      ed.clip = { kind: 'events', items: list.map(([e, f]) => ({ f, t0: e.t0 - base, t1: e.t1 - base, v: e.v, e: e.e })) };
+    } else {
+      if (!ed.selN.size) return false;
+      const list = [...ed.selN], base = Math.min(...list.map(n => n.beat));
+      ed.clip = { kind: 'notes', items: list.map(n => ({ ...n, beat: n.beat - base })) };
+    }
+    if (!quiet) flashHint(`${ed.clip.items.length}個コピーしました。貼り付けたい位置に移動して「貼り付け」（Ctrl+V）`);
+    updSelUI(); return true;
+  }
+  function deleteSel(quiet) {
+    const c = ch(); let k = 0;
+    if (ed.mode === 'line') {
+      const bx = c.boxes[ed.lineBox];
+      for (const [e, f] of ed.selE) { const l = bx.ev[f], i = l.indexOf(e); if (i >= 0) { l.splice(i, 1); k++; } }
+      if (ed.sel && ed.selE.has(ed.sel.ev)) closeSheet();
+      ed.selE.clear();
+    } else {
+      k = ed.selN.size; c.notes = c.notes.filter(n => !ed.selN.has(n)); ed.selN.clear();
+    }
+    if (k) { saveChart(); if (!quiet) flashHint(`${k}個削除しました`); }
+    updSelUI();
+  }
+  function cutSel() { if (copySel(true)) { const k = ed.clip.items.length; deleteSel(true); flashHint(`${k}個切り取りました。貼り付けたい位置で「貼り付け」（Ctrl+V）`); } }
+  function pasteClip() {
+    if (!ed.clip) return;
+    const c = ch(), at = Math.max(0, snap(ed.viewBeat));
+    if (ed.clip.kind === 'notes') {
+      if (ed.mode !== 'notes') setMode('notes');
+      const N = boxCount(c), taken = new Set(c.notes.map(n => n.b + ':' + n.beat));
+      ed.selN.clear(); let k = 0, skipped = 0;
+      for (const it of ed.clip.items) {
+        const beat = Math.round((at + it.beat) * 10000) / 10000;
+        if (it.b >= N) { skipped++; continue; }
+        if (taken.has(it.b + ':' + beat)) continue;
+        const n = { ...it, beat }; c.notes.push(n); ed.selN.add(n); k++;
+      }
+      sortChart(c); saveChart();
+      flashHint(`${fmtPos(at)} から ${k}個貼り付けました` + (skipped ? `（枠が足りず${skipped}個は貼れませんでした）` : ''));
+    } else {
+      if (ed.mode !== 'line') setMode('line');
+      const bx = c.boxes[ed.lineBox]; ed.selE.clear();
+      for (const it of ed.clip.items) {
+        const e = { t0: at + it.t0, t1: at + it.t1, v: it.v, e: it.e };
+        bx.ev[it.f].push(e); ed.selE.set(e, it.f);
+      }
+      sortChart(c); saveChart();
+      flashHint(`枠${ed.lineBox + 1}に ${fmtPos(at)} から イベント${ed.clip.items.length}個を貼り付けました`);
+    }
+    updSelUI();
+  }
+  function moveSel(dBeat, dLane) {
+    const c = ch();
+    if (ed.mode === 'line') {
+      if (!ed.selE.size) return false;
+      for (const [e] of ed.selE) { const d = Math.max(dBeat, -e.t0); e.t0 += d; e.t1 += d; }
+    } else {
+      if (!ed.selN.size) return false;
+      const N = boxCount(c);
+      for (const n of ed.selN) { n.beat = Math.max(0, Math.round((n.beat + dBeat) * 10000) / 10000); n.b = clamp(n.b + dLane, 0, N - 1); }
+    }
+    sortChart(c); saveChart(); return true;
+  }
+  $('edSelect').onclick = e => {
+    ed.selecting = !ed.selecting;
+    e.currentTarget.classList.toggle('on', ed.selecting); e.currentTarget.setAttribute('aria-pressed', ed.selecting);
+    ed.pending = null; ed.pendingLong = null; setHint();
+  };
+  $('edSelAll').onclick = selectAll;
+  $('edCopy').onclick = () => copySel();
+  $('edCut').onclick = cutSel;
+  $('edPaste').onclick = pasteClip;
+  $('edSelDel').onclick = () => deleteSel();
+  $('edSelNone').onclick = clearSel;
+
   // ---- timeline input ----
   edc.addEventListener('pointerdown', e => {
     edc.setPointerCapture(e.pointerId);
-    ed.drag = { y: e.clientY, x: e.clientX, v0: ed.viewBeat, moved: false };
+    const r = edc.getBoundingClientRect(), lx = e.clientX - r.left, ly = e.clientY - r.top;
+    ed.drag = { y: e.clientY, x: e.clientX, v0: ed.viewBeat, moved: false, lx, ly, cx: lx, cy: ly,
+      inLanes: lx >= GUT && lx <= EW - WAVE, add: e.shiftKey || e.ctrlKey || e.metaKey };
   });
   edc.addEventListener('pointermove', e => {
     const d = ed.drag; if (!d) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
+    if (!d.moved && (ed.selecting || d.add) && d.inLanes && Math.hypot(dx, dy) > 6) d.moved = 'rect';
+    if (d.moved === 'rect') { const r = edc.getBoundingClientRect(); d.cx = e.clientX - r.left; d.cy = e.clientY - r.top; return; }
     if (!d.moved) {
       if (Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy) && maxScroll() > 0) { d.moved = 'x'; d.s0 = scrollX(); }
       else if (Math.abs(dy) > 6) { d.moved = 'y'; if (ed.playing) edStop(); }
@@ -1596,11 +1824,13 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   });
   edc.addEventListener('pointerup', e => {
     const d = ed.drag; ed.drag = null;
+    if (d && d.moved === 'rect') { rectSelect(d); return; }
     if (!d || d.moved) return;
     const r = edc.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
     if (x < GUT || x > EW - WAVE) return;
     const raw = edBeat(y), b = snap(raw);
     const col = clamp(Math.floor((x - GUT + scrollX()) / lanesW()), 0, nLanes() - 1);
+    if (ed.selecting || d.add) { tapSelect(col, y, raw, d.add); return; }
     if (ed.mode === 'line') lineTap(col, b, raw); else if (b >= 0) placeOrRemove(col, b);
   });
   edc.addEventListener('wheel', e => {
@@ -1794,8 +2024,10 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
         eg.fillStyle = rgba(C.note, 0.35); eg.fillRect(x - ns * 0.3, yEnd, ns * 0.6, y - yEnd);
         eg.fillStyle = C.note; eg.fillRect(x - ns * 0.3, yEnd - 2, ns * 0.6, 4);
       }
+      if (ed.selN.has(n) && n.type === 'long') { eg.strokeStyle = C.PERFECT; eg.lineWidth = 2; eg.strokeRect(x - ns * 0.3 - 2, yEnd - 3, ns * 0.6 + 4, y - yEnd + 3); }
       eg.translate(x, y); drawNoteFlat(eg, n.type, ns, n.fake);
       eg.globalAlpha = 1;
+      if (ed.selN.has(n)) { eg.strokeStyle = C.PERFECT; eg.lineWidth = 2.5; eg.strokeRect(-ns / 2 - 4, -ns / 2 - 4, ns + 8, ns + 8); }
       if (hidden) { eg.strokeStyle = C.miss; eg.lineWidth = 2; eg.strokeRect(-ns / 2 - 3, -ns / 2 - 3, ns + 6, ns + 6); }
       const tags = [];
       if (n.spd !== 1) tags.push('×' + n.spd);
@@ -1826,10 +2058,10 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       for (const e of list) {
         const yS = edY(e.t0), yE = edY(e.t1);
         if (yE > EH + 4 || yS < -4) continue;
-        const sel = ed.sel && ed.sel.ev === e;
+        const picked = ed.selE.has(e), sel = (ed.sel && ed.sel.ev === e) || picked;
         const hgt = Math.max(4, yS - yE);
         eg.fillStyle = rgba(col, sel ? 0.45 : 0.28); eg.fillRect(x0 + 3, yS - hgt, lw - 6, hgt);
-        eg.strokeStyle = sel ? C.fg : col; eg.lineWidth = sel ? 2 : 1; eg.strokeRect(x0 + 3.5, yS - hgt + .5, lw - 7, hgt - 1);
+        eg.strokeStyle = picked ? C.PERFECT : sel ? C.fg : col; eg.lineWidth = sel ? 2.5 : 1; eg.strokeRect(x0 + 3.5, yS - hgt + .5, lw - 7, hgt - 1);
         // easing shape inside the bar
         if (e.t1 > e.t0 && hgt > 14 && lw > 18) {
           const fn = easeFn(e.e); eg.strokeStyle = rgba(C.fg, 0.5); eg.lineWidth = 1; eg.beginPath();
@@ -1874,6 +2106,12 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     const b0 = edBeat(EH) - 1, b1 = edBeat(0) + 1;
     eg.save(); eg.beginPath(); eg.rect(GUT, 0, EW - GUT - WAVE, EH); eg.clip();
     if (ed.mode === 'line') drawLineView(c, b0, b1); else drawNotesView(c, b0, b1);
+    const dr = ed.drag;
+    if (dr && dr.moved === 'rect') {
+      const x = Math.min(dr.lx, dr.cx), y = Math.min(dr.ly, dr.cy), w = Math.abs(dr.cx - dr.lx), h = Math.abs(dr.cy - dr.ly);
+      eg.fillStyle = rgba(C.PERFECT, 0.12); eg.fillRect(x, y, w, h);
+      eg.strokeStyle = C.PERFECT; eg.setLineDash([5, 4]); eg.lineWidth = 1.5; eg.strokeRect(x + .5, y + .5, w, h); eg.setLineDash([]);
+    }
     eg.restore();
     // bar numbers
     eg.fillStyle = C.dim; eg.font = '700 11px "M PLUS 1 Code", monospace'; eg.textAlign = 'left'; eg.textBaseline = 'middle';
@@ -1927,11 +2165,11 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     const exp = mode === 'export';
     $('ioTitle').textContent = exp ? '譜面の書き出し' : '譜面の読み込み';
     $('ioDesc').textContent = exp
-      ? 'この文字をコピーして保存すると、あとで「読み込み」から戻せます。曲のファイルは含まれません。'
-      : '書き出した譜面の文字を貼り付けてください。いまの譜面は置き換わります。';
+      ? 'コピーするかファイルに保存しておくと、あとで「読み込み」から戻せます。PCとiPhoneの間で譜面を移すときにも使えます。曲のファイルは含まれません。'
+      : '書き出した譜面の文字を貼り付けるか、保存した譜面ファイルを開いてください。いまの譜面は置き換わります（Ctrl+Z で戻せます）。';
     $('ioText').value = exp ? JSON.stringify({ format: 'beatblock-chart', version: 4, song: doc.name || doc.song.name, ...ch() }) : '';
     $('ioText').readOnly = exp;
-    $('ioCopy').hidden = !exp; $('ioLoad').hidden = exp; $('ioMsg').textContent = '';
+    $('ioCopy').hidden = $('ioSave').hidden = !exp; $('ioLoad').hidden = $('ioOpen').hidden = exp; $('ioMsg').textContent = '';
     $('ioModal').hidden = false;
     if (!exp) $('ioText').focus();
   }
@@ -1944,14 +2182,28 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
       t.focus(); t.select(); $('ioMsg').textContent = '自動コピーできませんでした。選択された文字を手動でコピーしてください。';
     });
   };
-  $('ioLoad').onclick = () => {
-    let o = null; try { o = JSON.parse($('ioText').value); } catch (e) {}
+  function loadChartText(text) {
+    let o = null; try { o = JSON.parse(text); } catch (e) {}
     const c = validChart(o);
-    if (!c) { $('ioMsg').textContent = '譜面として読み取れませんでした。書き出した文字をそのまま貼り付けてください。'; return; }
-    doc.chart = c; saveChart();
-    $('edBpm').value = c.bpm; $('edOffset').value = Math.round(c.offset * 1000); $('edDiff').value = c.diff || '';
-    ed.pending = null; ed.pendingLong = null; closeSheet(); syncBoxUI();
-    $('ioModal').hidden = true; flashHint(`読み込みました（ノーツ ${realNotes(c)}個）`);
+    if (!c) { $('ioMsg').textContent = '譜面として読み取れませんでした。書き出した文字やファイルをそのまま使ってください。'; return; }
+    applyChart(c); snapshot();
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    $('ioModal').hidden = true; flashHint(`読み込みました（ノーツ ${realNotes(c)}個）。Ctrl+Z で元に戻せます。`);
+  }
+  $('ioLoad').onclick = () => loadChartText($('ioText').value);
+  $('ioFile').addEventListener('change', async ev => {
+    const f = ev.target.files[0]; ev.target.value = '';
+    if (f) loadChartText(await f.text());
+  });
+  $('ioSave').onclick = () => {
+    try {
+      const name = (doc.name || doc.song.name || 'beatblock').replace(/[\\/:*?"<>|]/g, '_');
+      const url = URL.createObjectURL(new Blob([$('ioText').value], { type: 'application/json' }));
+      const a = document.createElement('a'); a.href = url; a.download = name + '.bbchart.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      $('ioMsg').textContent = `「${name}.bbchart.json」の保存を始めました。ファイルができない場合（このプレビュー画面など）は「コピー」を使ってください。`;
+    } catch (e) { $('ioMsg').textContent = 'ここではファイルに保存できません。「コピー」を使ってください。'; }
   };
 
   // =========================================================
