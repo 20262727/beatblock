@@ -1044,7 +1044,13 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   // =========================================================
   const WIN = { PERFECT: 0.045, GREAT: 0.080, GOOD: 0.130, EARLY_MISS: 0.180 };
   const VAL = { PERFECT: 1, GREAT: 0.7, GOOD: 0.35, MISS: 0 };
-  const FLICK_PX = 16, FLICK_MS = 350, HOLD_GRACE_MS = 150;
+  const FLICK_PX = 16, FLICK_MS = 350, HOLD_GRACE_MS = 150, SWIPE_MS = 120;
+  // a finger that is sliding: moved at least FLICK_PX within the last SWIPE_MS
+  function swiping(p) {
+    const tr = p.trail; if (!tr || tr.length < 2) return false;
+    const a = tr[0], b = tr[tr.length - 1];
+    return performance.now() - b.t < SWIPE_MS && Math.hypot(b.x - a.x, b.y - a.y) >= FLICK_PX;
+  }
   let S = null, lastPlay = null;
 
   function startPlay(entry, fromBeat, returnTo, auto) {
@@ -1154,6 +1160,16 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     const dx = px - bx.x, dy = py - bx.y, c = Math.cos(-bx.rz), s = Math.sin(-bx.rz);
     return Math.abs(dx * c - dy * s);
   }
+  // every box whose column the touch is in (columns can overlap)
+  function hitBoxes(px, py, boxes) {
+    const out = [];
+    for (const bx of boxes) {
+      if (bx.a < 0.5) continue;
+      const half = bx.size * 0.5 * 1.4 * Math.max(0.3, Math.abs(Math.cos(bx.ry)));
+      if (across(bx, px, py) <= half) out.push(bx.i);
+    }
+    return out;
+  }
   function hitBox(px, py, boxes) {
     let best = -1, bd = Infinity;
     for (const bx of boxes) {
@@ -1178,17 +1194,18 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
     e.preventDefault();
     if (screen !== 'play' || S.auto) return;
     try { cv.setPointerCapture(e.pointerId); } catch (err) {}
-    const [px, py] = localXY(e), b = hitBox(px, py, curBoxes());
-    const p = { x: px, y: py, sx: px, sy: py, box: b, flick: null };
+    const [px, py] = localXY(e), cur = curBoxes(), b = hitBox(px, py, cur), inBoxes = new Set(hitBoxes(px, py, cur));
+    const p = { x: px, y: py, sx: px, sy: py, box: b, flick: null, trail: [{ x: px, y: py, t: performance.now() }] };
     ptrs.set(e.pointerId, p);
-    if (b < 0) return;
+    if (!inBoxes.size) return;
     tapSound(ac.currentTime);
-    for (const n of S.notes) if (n.headDone && !n.done && n.holder === null && n.b === b) { n.holder = e.pointerId; n.lostAt = null; }
+    for (const n of S.notes) if (n.headDone && !n.done && n.holder === null && inBoxes.has(n.b)) { n.holder = e.pointerId; n.lostAt = null; }
     const now = gameTime(evCtxTime(e));
+    // where columns overlap, the touch goes to whichever of those boxes has the note closest in time
     let best = null, bd = Infinity;
     for (const n of S.notes) {
       if (n.t > now + WIN.EARLY_MISS) break;
-      if (n.done || n.headDone || n.pending || n.fake || n.b !== b || n.type === 'drag') continue;
+      if (n.done || n.headDone || n.pending || n.fake || !inBoxes.has(n.b) || n.type === 'drag') continue;
       const d = Math.abs(n.t - now);
       if (d < bd) { bd = d; best = n; }
     }
@@ -1202,6 +1219,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   cv.addEventListener('pointermove', e => {
     const p = ptrs.get(e.pointerId); if (!p || screen !== 'play') return;
     [p.x, p.y] = localXY(e);
+    const nowT = performance.now();
+    p.trail.push({ x: p.x, y: p.y, t: nowT });
+    while (p.trail.length > 2 && nowT - p.trail[0].t > SWIPE_MS) p.trail.shift();
     if (p.flick && Math.hypot(p.x - p.sx, p.y - p.sy) >= FLICK_PX) {
       const f = p.flick; p.flick = null; f.note.pending = false; f.note.done = true;
       judge(f.note, f.grade, f.diff); flickSound(ac.currentTime);
@@ -1294,12 +1314,22 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
         else if (lost) { judge(n, 'MISS', null); n.done = true; }
         continue;
       }
+      // rubbing: a finger sliding across the box's column when a flick arrives counts as the flick
+      if (n.type === 'flick' && !n.pending && t >= n.t - WIN.PERFECT && t - n.t <= WIN.GOOD) {
+        const bx = boxes[n.b];
+        for (const p of ptrs.values()) {
+          if (p.flick || !swiping(p) || hitBox(p.x, p.y, [bx]) !== n.b) continue;
+          const d = t - n.t; judge(n, gradeOf(Math.abs(d)), d); n.done = true; flickSound(ac.currentTime);
+          break;
+        }
+        if (n.done) continue;
+      }
       if (!n.pending && t - n.t > WIN.GOOD) missNote(n);
     }
     if (t > S.endSec) { finish(); return; }
 
     const held = new Array(S.N).fill(false);
-    for (const p of ptrs.values()) { const b = hitBox(p.x, p.y, boxes); if (b >= 0) held[b] = true; }
+    for (const p of ptrs.values()) for (const b of hitBoxes(p.x, p.y, boxes)) held[b] = true;
     if (S.auto) for (let i = 0; i < S.N; i++) if (nowMs - S.autoFlash[i] < 90) held[i] = true;
     const ph = ((beat % 1) + 1) % 1, pulse = 1 + 0.06 * Math.max(0, 1 - ph * 4);
     const byBox = Array.from({ length: S.N }, () => []);
